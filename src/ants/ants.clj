@@ -340,6 +340,19 @@
   (. Thread (sleep evap-sleep-ms))
   nil)
 
+(defn add-more-stuff []
+  (let [new-ants
+        (dosync
+         (dotimes [i food-places]
+           (let [p (place [(rand-int (dim)) (rand-int (dim))])]
+             (alter p assoc :food (rand-int food-range))))
+         (doall
+          (for [x home-range y home-range
+                :when (not (:ant @(place [x y])))]
+            (create-ant [x y] (rand-int 8)))))]
+    (prn "new ants: " (count new-ants) )
+    (dorun (map #(send-off % behave) new-ants))))
+
 (defn -main [& args]
   (def panel (doto (proxy [JPanel] []
                         (paint [g] (render g)))
