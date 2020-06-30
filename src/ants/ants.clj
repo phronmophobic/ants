@@ -311,7 +311,7 @@
       (.fillRect 0 0 (. img (getWidth)) (. img (getHeight))))
     (dorun 
      (for [x (range s) y (range s)]
-       (render-place bg (v (+ (* x (dim)) y)) x y)))
+       (render-place bg (v (+ (* x s) y)) x y)))
     (doto bg
       (.setColor (. Color blue))
       (.drawRect (* scale home-off) (* scale home-off) 
