@@ -1,3 +1,4 @@
+(ns ants.ants)
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Ant sim ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;   Copyright (c) Rich Hickey. All rights reserved.
 ;   The use and distribution terms for this software are covered by the
@@ -8,7 +9,7 @@
 ;   You must not remove this notice, or any other, from this software.
 
 ;dimensions of square world
-(def dim 80)
+(def initial-dim 80)
 ;number of ants = nants-sqrt^2
 (def nants-sqrt 7)
 ;number of places with food
@@ -31,15 +32,38 @@
 (defstruct cell :food :pher) ;may also have :ant and :home
 
 ;world is a 2d vector of refs to cells
-(def world 
-     (apply vector 
-            (map (fn [_] 
-                   (apply vector (map (fn [_] (ref (struct cell 0 0))) 
-                                      (range dim)))) 
-                 (range dim))))
+(def world
+  (ref
+   {:places
+    (apply vector 
+           (map (fn [_] 
+                  (apply vector (map (fn [_] (ref (struct cell 0 0))) 
+                                     (range initial-dim)))) 
+                (range initial-dim)))}))
+
+(defn set-world-dim! [new-dim]
+  (dosync
+   (alter world
+          update :places
+          (fn [places]
+            (apply vector 
+                   (map (fn [i] 
+                          (apply vector (map (fn [j]
+                                               (get-in places [i j]
+                                                       (ref (struct cell 0 0)))) 
+                                             (range new-dim)))) 
+                        (range new-dim))))
+          ))
+  nil)
+
+(defn dim []
+  (count (:places @world)))
 
 (defn place [[x y]]
-  (-> world (nth x) (nth y)))
+  (let [s (dim)]
+    (when (and (< x s)
+               (< y s))
+      (-> @world :places (nth x) (nth y)))))
 
 (defstruct ant :dir) ;may also have :food
 
@@ -52,7 +76,7 @@
         (alter p assoc :ant a)
         (agent loc))))
 
-(def home-off (/ dim 4))
+(def home-off (/ initial-dim 4))
 (def home-range (range home-off (+ nants-sqrt home-off)))
 
 (defn setup 
@@ -60,7 +84,7 @@
   []
   (sync nil
     (dotimes [i food-places]
-      (let [p (place [(rand-int dim) (rand-int dim)])]
+      (let [p (place [(rand-int (dim)) (rand-int (dim))])]
         (alter p assoc :food (rand-int food-range))))
     (doall
      (for [x home-range y home-range]
@@ -104,7 +128,7 @@
   "returns the location one step in the given dir. Note the world is a torus"
   [[x y] dir]
     (let [[dx dy] (dir-delta (bound 8 dir))]
-      [(bound dim (+ x dx)) (bound dim (+ y dy))]))
+      [(bound (dim) (+ x dx)) (bound (dim) (+ y dy))]))
 
 ;(defmacro dosync [& body]
 ;  `(sync nil ~@body))
@@ -165,54 +189,64 @@
     (reduce (fn [ret i] (assoc ret (nth sorted i) (inc i)))
             {} (range (count sorted)))))
 
+(def deaths (atom []))
+
 (defn behave 
   "the main function for the ant agent"
   [loc]
-  (let [p (place loc)
-        ant (:ant @p)
-        ahead (place (delta-loc loc (:dir ant)))
-        ahead-left (place (delta-loc loc (dec (:dir ant))))
-        ahead-right (place (delta-loc loc (inc (:dir ant))))
-        places [ahead ahead-left ahead-right]]
-    (. Thread (sleep ant-sleep-ms))
+  (try
     (dosync
-     (when running
-       (send-off *agent* #'behave))
-     (if (:food ant)
-       ;going home
-       (cond 
-        (:home @p)                              
-          (-> loc drop-food (turn 4))
-        (and (:home @ahead) (not (:ant @ahead))) 
-          (move loc)
-        :else
-          (let [ranks (merge-with + 
-                        (rank-by (comp #(if (:home %) 1 0) deref) places)
-                        (rank-by (comp :pher deref) places))]
-          (([move #(turn % -1) #(turn % 1)]
-            (wrand [(if (:ant @ahead) 0 (ranks ahead)) 
-                    (ranks ahead-left) (ranks ahead-right)]))
-           loc)))
-       ;foraging
-       (cond 
-        (and (pos? (:food @p)) (not (:home @p))) 
-          (-> loc take-food (turn 4))
-        (and (pos? (:food @ahead)) (not (:home @ahead)) (not (:ant @ahead)))
-          (move loc)
-        :else
-          (let [ranks (merge-with + 
-                                  (rank-by (comp :food deref) places)
-                                  (rank-by (comp :pher deref) places))]
-          (([move #(turn % -1) #(turn % 1)]
-            (wrand [(if (:ant @ahead) 0 (ranks ahead)) 
-                    (ranks ahead-left) (ranks ahead-right)]))
-           loc)))))))
+     (ensure world)
+     (let [p (place loc)]
+       (if-not p
+         (swap! deaths conj loc)
+         (let [ant (:ant @p)
+               ahead (place (delta-loc loc (:dir ant)))
+               ahead-left (place (delta-loc loc (dec (:dir ant))))
+               ahead-right (place (delta-loc loc (inc (:dir ant))))
+               places [ahead ahead-left ahead-right]]
+           (. Thread (sleep ant-sleep-ms))
+           (dosync
+            (when running
+              (send-off *agent* #'behave))
+            (if (:food ant)
+              ;; going home
+              (cond 
+                (:home @p)
+                (-> loc drop-food (turn 4))
+                (and (:home @ahead) (not (:ant @ahead))) 
+                (move loc)
+                :else
+                (let [ranks (merge-with + 
+                                        (rank-by (comp #(if (:home %) 1 0) deref) places)
+                                        (rank-by (comp :pher deref) places))]
+                  (([move #(turn % -1) #(turn % 1)]
+                    (wrand [(if (:ant @ahead) 0 (ranks ahead)) 
+                            (ranks ahead-left) (ranks ahead-right)]))
+                   loc)))
+                                        ;foraging
+              (cond 
+                (and (pos? (:food @p)) (not (:home @p))) 
+                (-> loc take-food (turn 4))
+                (and (pos? (:food @ahead)) (not (:home @ahead)) (not (:ant @ahead)))
+                (move loc)
+                :else
+                (let [ranks (merge-with + 
+                                        (rank-by (comp :food deref) places)
+                                        (rank-by (comp :pher deref) places))]
+                  (([move #(turn % -1) #(turn % 1)]
+                    (wrand [(if (:ant @ahead) 0 (ranks ahead)) 
+                            (ranks ahead-left) (ranks ahead-right)]))
+                   loc)))))))))
+    (catch Exception e
+      (println e)
+      (swap! deaths conj e))))
 
 (defn evaporate 
   "causes all the pheromones to evaporate a bit"
   []
   (dorun 
-   (for [x (range dim) y (range dim)]
+   (for [x (range (dim)) y (range (dim))]
      (dosync 
       (let [p (place [x y])]
         (alter p assoc :pher (* evap-rate (:pher @p))))))))
@@ -262,17 +296,21 @@
     (render-ant (:ant p) g x y)))
 
 (defn render [g]
-  (let [v (dosync (apply vector (for [x (range dim) y (range dim)] 
-                                   @(place [x y]))))
-        img (new BufferedImage (* scale dim) (* scale dim) 
+  (let [
+        [s v]
+        (dosync
+         [(dim)
+          (apply vector (for [x (range (dim)) y (range (dim))] 
+                          @(place [x y])))])
+        img (new BufferedImage (* scale s) (* scale s) 
                  (. BufferedImage TYPE_INT_ARGB))
         bg (. img (getGraphics))]
     (doto bg
       (.setColor (. Color white))
       (.fillRect 0 0 (. img (getWidth)) (. img (getHeight))))
     (dorun 
-     (for [x (range dim) y (range dim)]
-       (render-place bg (v (+ (* x dim) y)) x y)))
+     (for [x (range s) y (range s)]
+       (render-place bg (v (+ (* x (dim)) y)) x y)))
     (doto bg
       (.setColor (. Color blue))
       (.drawRect (* scale home-off) (* scale home-off) 
@@ -280,16 +318,11 @@
     (. g (drawImage img 0 0 nil))
     (. bg (dispose))))
 
-(def panel (doto (proxy [JPanel] []
-                        (paint [g] (render g)))
-             (.setPreferredSize (new Dimension 
-                                     (* scale dim) 
-                                     (* scale dim)))))
 
-(def frame (doto (new JFrame) (.add panel) .pack .show))
 
 (def animator (agent nil))
 
+(declare panel)
 (defn animation [x]
   (when running
     (send-off *agent* #'animation))
@@ -306,13 +339,25 @@
   (. Thread (sleep evap-sleep-ms))
   nil)
 
+(defn -main [& args]
+  (def panel (doto (proxy [JPanel] []
+                        (paint [g] (render g)))
+             (.setPreferredSize (new Dimension 
+                                     (* scale (dim)) 
+                                     (* scale (dim))))))
+
+  
+  (def frame (doto (new JFrame) (.add panel) .pack .show))
+  (def ants (setup))
+  (send-off animator animation)
+  (dorun (map #(send-off % behave) ants))
+  (send-off evaporator evaporation)
+
+  )
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; use ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; (comment
 ;demo
 ;; (load-file "/Users/rich/dev/clojure/ants.clj")
-(def ants (setup))
-(send-off animator animation)
-(dorun (map #(send-off % behave) ants))
-(send-off evaporator evaporation)
 
 ;; )
